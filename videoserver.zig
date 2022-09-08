@@ -1015,6 +1015,7 @@ const Capture = struct {
         for (self.mmaps) |mmap| {
             os.munmap(mmap);
         }
+        os.close(self.fd);
     }
 };
 
