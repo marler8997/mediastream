@@ -1,6 +1,6 @@
 const std = @import("std");
 const os = std.os;
-const Ioctl = @import("ioctl.zig").Ioctl;
+const ioctlFunc = @import("ioctl.zig").ioctlFunc;
 
 // Find all the video4linux2 devices reported by the kernel
 pub const KernelDevices = struct {
@@ -256,13 +256,13 @@ pub const Buffer = extern struct {
 };
 
 pub const ioctl = struct {
-    pub const querycap = Ioctl(.read , 'V', 0, Capability);
-    pub const enum_fmt = Ioctl(.read_write, 'V', 2, Fmtdesc);
-    pub const g_fmt = Ioctl(.read_write, 'V', 4, Format);
-    pub const s_fmt = Ioctl(.read_write, 'V', 5, Format);
-    pub const reqbufs = Ioctl(.read_write, 'V', 8, Requestbuffers);
-    pub const querybuf = Ioctl(.read_write, 'V', 9, Buffer);
-    pub const qbuf = Ioctl(.read_write, 'V', 15, Buffer);
-    pub const dqbuf = Ioctl(.read_write, 'V', 17, Buffer);
-    pub const streamon = Ioctl(.write, 'V', 18, BufType);
+    pub const querycap = ioctlFunc(.read , 'V', 0, Capability);
+    pub const enum_fmt = ioctlFunc(.read_write, 'V', 2, Fmtdesc);
+    pub const g_fmt = ioctlFunc(.read_write, 'V', 4, Format);
+    pub const s_fmt = ioctlFunc(.read_write, 'V', 5, Format);
+    pub const reqbufs = ioctlFunc(.read_write, 'V', 8, Requestbuffers);
+    pub const querybuf = ioctlFunc(.read_write, 'V', 9, Buffer);
+    pub const qbuf = ioctlFunc(.read_write, 'V', 15, Buffer);
+    pub const dqbuf = ioctlFunc(.read_write, 'V', 17, Buffer);
+    pub const streamon = ioctlFunc(.write, 'V', 18, BufType);
 };

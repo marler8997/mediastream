@@ -13,20 +13,20 @@ pub const IoctlDirection = enum {
 /// Linux encodes the size of the argument and its IO direction within the request number.
 /// This function ties ioctl number definition to the Zig type system through the type-safe
 /// wrapper function.
-pub fn Ioctl(
+pub fn ioctlFunc(
     comptime dir: IoctlDirection,
     comptime io_type: u8,
     comptime nr: u8,
-    comptime T: type,
-) IoctlInfo(dir, io_type, nr, T).Fn {
-    return IoctlInfo(dir, io_type, nr, T).call;
+    comptime Arg: type,
+) ioctlInfo(dir, io_type, nr, Arg).Fn {
+    return ioctlInfo(dir, io_type, nr, Arg).call;
 }
 
-fn IoctlInfo(comptime dir: IoctlDirection, comptime io_type: u8, comptime nr: u8, comptime T: type) type {
+fn ioctlInfo(comptime dir: IoctlDirection, comptime io_type: u8, comptime nr: u8, comptime Arg: type) type {
     comptime {
         switch (dir) {
             .none => {
-                std.debug.assert(T == void);
+                std.debug.assert(Arg == void);
             },
             else => {},
         }
@@ -35,28 +35,28 @@ fn IoctlInfo(comptime dir: IoctlDirection, comptime io_type: u8, comptime nr: u8
     return struct {
         pub const request = switch (dir) {
             .none => std.os.linux.IOCTL.IO(io_type, nr),
-            .read => std.os.linux.IOCTL.IOR(io_type, nr, T),
-            .write => std.os.linux.IOCTL.IOW(io_type, nr, T),
-            .read_write => std.os.linux.IOCTL.IOWR(io_type, nr, T),
+            .read => std.os.linux.IOCTL.IOR(io_type, nr, Arg),
+            .write => std.os.linux.IOCTL.IOW(io_type, nr, Arg),
+            .read_write => std.os.linux.IOCTL.IOWR(io_type, nr, Arg),
         };
 
-        const Arg = switch (dir) {
+        const ArgPtr = switch (dir) {
             .none => void,
-            .read => *T,
-            .write => *const T,
-            .read_write => *T,
+            .read => *Arg,
+            .write => *const Arg,
+            .read_write => *Arg,
         };
 
         pub const Fn =
             if (Arg == void) fn(fd: std.os.fd_t) usize
-            else fn (fd: std.os.fd_t, arg: Arg) usize;
+            else fn (fd: std.os.fd_t, arg: ArgPtr) usize;
 
         pub usingnamespace if (Arg == void) struct {
             pub fn call(fd: std.os.fd_t) usize {
                 return std.os.linux.syscall2(.ioctl, @bitCast(usize, @as(isize, fd)), request);
             }
         } else struct {
-            pub fn call(fd: std.os.fd_t, arg: Arg) usize {
+            pub fn call(fd: std.os.fd_t, arg: ArgPtr) usize {
                 return std.os.linux.ioctl(fd, request, @ptrToInt(arg));
             }
         };

@@ -6,6 +6,7 @@ const common = @import("common.zig");
 const video4linux2 = @import("video4linux2.zig");
 const Memfd = x.Memfd;
 const ContiguousReadBuffer = x.ContiguousReadBuffer;
+const convert = @import("convert.zig");
 
 const global = struct {
     var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -316,7 +317,20 @@ fn onVideo(capture: Capture, opt_frame_ref: *?CapturedRgbFrame) !enum { got_fram
             .mem = try global.gpa.alloc(u8, rgb_len),
         };
     }
-    @memcpy(opt_frame_ref.*.?.mem.ptr, mem.ptr, std.math.min(mem.len, rgb_len));
+
+    switch (capture.format) {
+        .yuyv => convert.yuyvToRgb(
+            opt_frame_ref.*.?.mem.ptr,
+            capture.width * 4,
+            mem.ptr,
+            capture.stride,
+            capture.width,
+            capture.height),
+        .unknown =>
+            // just copy it in there as is, we'll see "something"
+            @memcpy(opt_frame_ref.*.?.mem.ptr, mem.ptr, std.math.min(mem.len, rgb_len)),
+    }
+
 
     try v4l2QueueBuf(capture.fd, buf.index);
     return .got_frame;
@@ -550,11 +564,14 @@ fn startPreview(video_dev: VideoDev) !Capture {
     }
     const fourcc = FourCC.initRef(&format.fmt.pix.pixelformat);
     std.log.info("format is '{s}' {}", .{fourcc.chars, format.fmt.pix});
-//    if (fourcc.val != FourCC.initCt("YUYV").val) {
-//        // TODO: show error to user
-//        std.log.info("format '{s}' is not supported yet", .{fourcc.chars});
-//        return error.Reported;
-//    }
+    const cap_format: CaptureFormat = blk: {
+        if (fourcc.val == FourCC.initCt("YUYV").val)
+            break :blk .yuyv;
+
+        // TODO: show error to user
+        std.log.info("format '{s}' is not supported yet", .{fourcc.chars});
+        break :blk .unknown;
+    };
 
     // call S_FMT so we *might* get ownership?
     switch (os.errno(video4linux2.ioctl.s_fmt(fd, &format))) {
@@ -665,7 +682,7 @@ fn startPreview(video_dev: VideoDev) !Capture {
         .width = format.fmt.pix.width,
         .height = format.fmt.pix.height,
         .stride = format.fmt.pix.bytesperline,
-        .format = .yuyv,
+        .format = cap_format,
         .mmaps = [capture_buf_count][]u8 {
             ptr[0 .. buf.length],
         },
@@ -908,12 +925,16 @@ const FontDims = struct {
 };
 
 const capture_buf_count = 1;
+const CaptureFormat = enum {
+    yuyv,
+    unknown,
+};
 const Capture = struct {
     fd: os.fd_t,
     width: u32,
     height: u32,
     stride: u32,
-    format: enum { yuyv },
+    format: CaptureFormat,
     mmaps: [capture_buf_count][]align(std.mem.page_size) u8,
     pub fn deinit(self: Capture) void {
         for (self.mmaps) |mmap| {
@@ -1082,7 +1103,10 @@ fn render(
             .show_devices => {
                 _ = try renderString(sock, drawable_id, fg_gc_id, 10, text_bottom_y - 2 * (font_dims.height + text_spacing_y), "r: refresh", .{});
             },
-            .device => {
+            .device => |*dev| {
+                if (dev.capture) |*cap| {
+                    _ = try renderString(sock, drawable_id, fg_gc_id, 10, text_bottom_y - 4 * (font_dims.height + text_spacing_y), "video format: {s}", .{@tagName(cap.format)});
+                }
                 _ = try renderString(sock, drawable_id, fg_gc_id, 10, text_bottom_y - 3 * (font_dims.height + text_spacing_y), "p: show preview", .{});
                 _ = try renderString(sock, drawable_id, fg_gc_id, 10, text_bottom_y - 2 * (font_dims.height + text_spacing_y), "b: back to device list", .{});
             },
