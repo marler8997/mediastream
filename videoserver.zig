@@ -24,6 +24,15 @@ const Key = union(enum) {
     escape: void,
 };
 
+pub const Ids = struct {
+    base: u32,
+    pub fn window(self: Ids) u32 { return self.base; }
+    pub fn bg_gc(self: Ids) u32 { return self.base + 1; }
+    pub fn fg_gc(self: Ids) u32 { return self.base + 2; }
+    pub fn backbuffer(self: Ids) u32 { return self.base + 3; }
+};
+const Dbe = struct { opcode: u8 };
+
 fn addKeysymText(map: *std.AutoHashMapUnmanaged(x.charset.Combined, Key), c: x.charset.Latin1) !void {
     try map.put(global.gpa, c.toCombined(), .{ .text = @enumToInt(c) });
 }
@@ -112,11 +121,11 @@ pub fn main() !u8 {
 
     // TODO: maybe need to call conn.setup.verify or something?
 
-    const window_id = conn.setup.fixed().resource_id_base;
+    const ids = Ids{ .base = conn.setup.fixed().resource_id_base };
     {
         var msg_buf: [x.create_window.max_len]u8 = undefined;
         const len = x.create_window.serialize(&msg_buf, .{
-            .window_id = window_id,
+            .window_id = ids.window(),
             .parent_window_id = screen.root,
             .x = 0,
             .y = 0,
@@ -152,39 +161,32 @@ pub fn main() !u8 {
         try conn.send(msg_buf[0..len]);
     }
 
-    const bg_gc_id = window_id + 1;
+    const bg_color = 0x333333;
+
     {
         var msg_buf: [x.create_gc.max_len]u8 = undefined;
         const len = x.create_gc.serialize(&msg_buf, .{
-            .gc_id = bg_gc_id,
+            .gc_id = ids.bg_gc(),
             .drawable_id = screen.root,
        }, .{
-            .foreground = screen.black_pixel,
-        });
-        try conn.send(msg_buf[0..len]);
-    }
-    const fg_gc_id = window_id + 2;
-    {
-        var msg_buf: [x.create_gc.max_len]u8 = undefined;
-        const len = x.create_gc.serialize(&msg_buf, .{
-            .gc_id = fg_gc_id,
-            .drawable_id = screen.root,
-        }, .{
-            //.background = screen.black_pixel,
-            .background = 0x333333,
-            //.foreground = 0xffaadd,
-            .foreground = 0xcccccc,
+            .foreground = bg_color,
         });
         try conn.send(msg_buf[0..len]);
     }
 
-    // get some font information
+
     {
-        const text_literal = [_]u16{'m'};
-        const text = x.Slice(u16, [*]const u16){ .ptr = &text_literal, .len = text_literal.len };
-        var msg: [x.query_text_extents.getLen(text.len)]u8 = undefined;
-        x.query_text_extents.serialize(&msg, fg_gc_id, text);
-        try conn.send(&msg);
+        var msg_buf: [x.create_gc.max_len]u8 = undefined;
+        const len = x.create_gc.serialize(&msg_buf, .{
+            .gc_id = ids.fg_gc(),
+            .drawable_id = screen.root,
+        }, .{
+            //.background = screen.black_pixel,
+            .background = bg_color,
+            //.foreground = 0xffaadd,
+            .foreground = 0xcccccc,
+        });
+        try conn.send(msg_buf[0..len]);
     }
 
     const buf_memfd = try Memfd.init("ZigX11DoubleBuffer");
@@ -193,6 +195,80 @@ pub fn main() !u8 {
     std.log.info("buffer capacity is {}", .{buffer_capacity});
     var buf = ContiguousReadBuffer{ .double_buffer_ptr = try buf_memfd.toDoubleBuffer(buffer_capacity), .half_size = buffer_capacity };
 
+    {
+        var msg: [x.query_extension.getLen(x.dbe.name.len)]u8 = undefined;
+        x.query_extension.serialize(&msg, x.dbe.name);
+        try conn.send(&msg);
+    }
+    var optional_dbe: ?Dbe = null;
+    {
+        _ = try x.readOneMsg(conn.reader(), @alignCast(4, buf.nextReadBuffer()));
+        switch (x.serverMsgTaggedUnion(@alignCast(4, buf.double_buffer_ptr))) {
+            .reply => |msg_reply| {
+                const msg = @ptrCast(*x.ServerMsg.QueryExtension, msg_reply);
+                if (msg.present == 0) {
+                    std.log.info("'{s}' extension is NOT present", .{x.dbe.name.nativeSlice()});
+                } else {
+                    std.log.info("'{s}' extension is present", .{x.dbe.name.nativeSlice()});
+                    optional_dbe = Dbe{ .opcode = msg.major_opcode };
+                }
+            },
+            else => |msg| {
+                std.log.err("expected a reply but got {}", .{msg});
+                return 1;
+            },
+        }
+    }
+
+    if (optional_dbe) |dbe| {
+        {
+            var msg: [x.dbe.get_version.len]u8 = undefined;
+            x.dbe.get_version.serialize(&msg, .{
+                .ext_opcode = dbe.opcode,
+                .wanted_major_version = 1,
+                .wanted_minor_version = 0,
+            });
+            try conn.send(&msg);
+        }
+        _ = try x.readOneMsg(conn.reader(), @alignCast(4, buf.nextReadBuffer()));
+        switch (x.serverMsgTaggedUnion(@alignCast(4, buf.double_buffer_ptr))) {
+            .reply => |msg_reply| {
+                const msg = @ptrCast(*x.dbe.get_version.Reply, msg_reply);
+                if (msg.major_version != 1) {
+                    std.log.info("the '{s}' extension is too new (need 1 got {})", .{x.dbe.name.nativeSlice(), msg.major_version});
+                    optional_dbe = null;
+                } else {
+                    std.log.info("'{s}' extension is at version {}.{}", .{x.dbe.name.nativeSlice(), msg.major_version, msg.minor_version});
+                }
+            },
+            else => |msg| {
+                std.log.err("expected a reply but got {}", .{msg});
+                return 1;
+            },
+        }
+    }
+
+    if (optional_dbe) |dbe| {
+        var msg: [x.dbe.allocate.len]u8 = undefined;
+        x.dbe.allocate.serialize(&msg, .{
+            .ext_opcode = dbe.opcode,
+            .window = ids.window(),
+            .backbuffer = ids.backbuffer(),
+            .swapaction = .dontcare,
+        });
+        try conn.send(&msg);
+    }
+
+
+
+    // get some font information
+    {
+        const text_literal = [_]u16{'m'};
+        const text = x.Slice(u16, [*]const u16){ .ptr = &text_literal, .len = text_literal.len };
+        var msg: [x.query_text_extents.getLen(text.len)]u8 = undefined;
+        x.query_text_extents.serialize(&msg, ids.fg_gc(), text);
+        try conn.send(&msg);
+    }
     const font_dims: FontDims = blk: {
         _ = try x.readOneMsg(conn.reader(), @alignCast(4, buf.nextReadBuffer()));
         switch (x.serverMsgTaggedUnion(@alignCast(4, buf.double_buffer_ptr))) {
@@ -214,7 +290,7 @@ pub fn main() !u8 {
 
     {
         var msg: [x.map_window.len]u8 = undefined;
-        x.map_window.serialize(&msg, window_id);
+        x.map_window.serialize(&msg, ids.window());
         try conn.send(&msg);
     }
 
@@ -266,7 +342,7 @@ pub fn main() !u8 {
                 switch (try onVideo(video.capture, video.opt_frame_ref)) {
                     .no_frame => {},
                     .got_frame => {
-                        try render(conn.sock, max_request_len, window_id, bg_gc_id, fg_gc_id, font_dims, &state);
+                        try render(conn.sock, max_request_len, ids, optional_dbe, font_dims, &state);
                     },
                 }
                 fd_processed += 1;
@@ -274,7 +350,7 @@ pub fn main() !u8 {
         }
 
         if (fd_processed < fd_ready and poll_fd_buf[0].revents != 0) {
-            try onX11Read(keycode_map, window_id, max_request_len, bg_gc_id, fg_gc_id, conn.sock, &buf, font_dims, &state);
+            try onX11Read(conn.sock, keycode_map, ids, max_request_len, &buf, optional_dbe, font_dims, &state);
             fd_processed += 1;
         }
 
@@ -337,13 +413,12 @@ fn onVideo(capture: Capture, opt_frame_ref: *?CapturedRgbFrame) !enum { got_fram
 }
 
 fn onX11Read(
-    keycode_map: std.AutoHashMapUnmanaged(u8, Key),
-    window_id: u32,
-    max_request_len: u18,
-    bg_gc_id: u32,
-    fg_gc_id: u32,
     sock: os.socket_t,
+    keycode_map: std.AutoHashMapUnmanaged(u8, Key),
+    ids: Ids,
+    max_request_len: u18,
     buf: *ContiguousReadBuffer,
+    optional_dbe: ?Dbe,
     font_dims: FontDims,
     state: *State,
 ) !void {
@@ -379,7 +454,7 @@ fn onX11Read(
                     .text => |ascii| {
                         std.log.info("key_press: ascii '{c}' ({0})", .{ascii});
                         if (state.cmd.append(ascii)) {
-                            try render(sock, max_request_len, window_id, bg_gc_id, fg_gc_id, font_dims, state);
+                            try render(sock, max_request_len, ids, optional_dbe, font_dims, state);
                         } else {
                             // TODO: show something on the UI
                             std.log.warn("command buffer is full", .{});
@@ -400,7 +475,7 @@ fn onX11Read(
                             std.log.info("unknown command '{s}'", .{cmd});
                         }
                         state.cmd.len = 0;
-                        try render(sock, max_request_len, window_id, bg_gc_id, fg_gc_id, font_dims, state);
+                        try render(sock, max_request_len, ids, optional_dbe, font_dims, state);
                     },
                     .escape => {
                         std.log.info("quitting from ESC", .{});
@@ -436,7 +511,7 @@ fn onX11Read(
             },
             .expose => |msg| {
                 std.log.info("expose: {}", .{msg});
-                try render(sock, max_request_len, window_id, bg_gc_id, fg_gc_id, font_dims, state);
+                try render(sock, max_request_len, ids, optional_dbe, font_dims, state);
             },
             .unhandled => |msg| {
                 std.log.info("todo: server msg {}", .{msg});
@@ -986,23 +1061,37 @@ const State = struct {
 fn render(
     sock: os.socket_t,
     max_request_len: u18,
-    drawable_id: u32,
-    bg_gc_id: u32,
-    fg_gc_id: u32,
+    ids: Ids,
+    optional_dbe: ?Dbe,
     font_dims: FontDims,
     state: *State,
 ) !void {
-    _ = bg_gc_id;
-    {
+
+    const drawable = blk: {
+        if (optional_dbe) |_| {
+            var msg: [x.poly_fill_rectangle.getLen(1)]u8 = undefined;
+            x.poly_fill_rectangle.serialize(&msg, .{
+                .drawable_id = ids.backbuffer(),
+                .gc_id = ids.bg_gc(),
+            }, &[1]x.Rectangle {.{
+                .x = 0, .y = 0,
+                .width = window_width,
+                .height = window_height,
+            }});
+            try common.send(sock, &msg);
+            break :blk ids.backbuffer();
+        }
+
         var msg: [x.clear_area.len]u8 = undefined;
-        x.clear_area.serialize(&msg, false, drawable_id, .{
+        x.clear_area.serialize(&msg, false, ids.window(), .{
             .x = 0,
             .y = 0,
             .width = window_width,
             .height = window_height,
         });
         try common.send(sock, &msg);
-    }
+        break :blk ids.window();
+    };
 
     _ = max_request_len;
 //    {
@@ -1027,8 +1116,8 @@ fn render(
 //        try sendImage(
 //            sock,
 //            max_request_len,
-//            drawable_id,
-//            fg_gc_id,
+//            drawable,
+//            ids.fg_gc(),
 //            20,
 //            20,
 //            width,
@@ -1051,8 +1140,8 @@ fn render(
 //        try sendImage(
 //            sock,
 //            max_request_len,
-//            drawable_id,
-//            fg_gc_id,
+//            drawable,
+//            ids.fg_gc(),
 //            20 + 260,
 //            20,
 //            width,
@@ -1070,20 +1159,20 @@ fn render(
                     // TODO: make an option to show all video devs maybe?
                     continue;
                 }
-                try renderVideoDev(sock, drawable_id, fg_gc_id, font_dims, y_pos, video_dev.*);
+                try renderVideoDev(sock, drawable, ids.fg_gc(), font_dims, y_pos, video_dev.*);
                 y_pos += font_dims.height + 4;
             }
         },
         .device => |*dev| {
             const device = &dev.video_devs.items[dev.device_index];
             const text_y = 10 + font_dims.font_ascent;
-            try renderVideoDev(sock, drawable_id, fg_gc_id, font_dims, text_y, device.*);
+            try renderVideoDev(sock, drawable, ids.fg_gc(), font_dims, text_y, device.*);
             if (dev.last_frame) |frame| {
                 try sendImage(
                     sock,
                     max_request_len,
-                    drawable_id,
-                    fg_gc_id,
+                    drawable,
+                    ids.fg_gc(),
                     10,
                     text_y + 10,
                     frame.width,
@@ -1098,17 +1187,17 @@ fn render(
     const text_spacing_y = 4;
     const text_bottom_y = window_height - 10 - font_dims.font_ascent;
     {
-        _ = try renderString(sock, drawable_id, fg_gc_id, 10, text_bottom_y - 1 * (font_dims.height + text_spacing_y), "ESC: quit", .{});
+        _ = try renderString(sock, drawable, ids.fg_gc(), 10, text_bottom_y - 1 * (font_dims.height + text_spacing_y), "ESC: quit", .{});
         switch (state.main) {
             .show_devices => {
-                _ = try renderString(sock, drawable_id, fg_gc_id, 10, text_bottom_y - 2 * (font_dims.height + text_spacing_y), "r: refresh", .{});
+                _ = try renderString(sock, drawable, ids.fg_gc(), 10, text_bottom_y - 2 * (font_dims.height + text_spacing_y), "r: refresh", .{});
             },
             .device => |*dev| {
                 if (dev.capture) |*cap| {
-                    _ = try renderString(sock, drawable_id, fg_gc_id, 10, text_bottom_y - 4 * (font_dims.height + text_spacing_y), "video format: {s}", .{@tagName(cap.format)});
+                    _ = try renderString(sock, drawable, ids.fg_gc(), 10, text_bottom_y - 4 * (font_dims.height + text_spacing_y), "video format: {s}", .{@tagName(cap.format)});
                 }
-                _ = try renderString(sock, drawable_id, fg_gc_id, 10, text_bottom_y - 3 * (font_dims.height + text_spacing_y), "p: show preview", .{});
-                _ = try renderString(sock, drawable_id, fg_gc_id, 10, text_bottom_y - 2 * (font_dims.height + text_spacing_y), "b: back to device list", .{});
+                _ = try renderString(sock, drawable, ids.fg_gc(), 10, text_bottom_y - 3 * (font_dims.height + text_spacing_y), "p: show preview", .{});
+                _ = try renderString(sock, drawable, ids.fg_gc(), 10, text_bottom_y - 2 * (font_dims.height + text_spacing_y), "b: back to device list", .{});
             },
         }
 
@@ -1117,15 +1206,25 @@ fn render(
         // TODO: draw a background behind the command (maybe black?)
         const cmd = state.cmd.slice();
         if (cmd.len > 0) {
-            _ = try renderString(sock, drawable_id, fg_gc_id, 10, text_bottom_y, "{s}", .{ state.cmd.slice() });
+            _ = try renderString(sock, drawable, ids.fg_gc(), 10, text_bottom_y, "{s}", .{ state.cmd.slice() });
         }
+    }
+
+    if (optional_dbe) |dbe| {
+        var msg: [x.dbe.swap.getLen(1)]u8 = undefined;
+        const swap_infos_arr = [1]x.dbe.SwapInfo{
+            .{ .window = ids.window(), .action = .dontcare },
+        };
+        const swap_infos = x.Slice(u32, [*]const x.dbe.SwapInfo){ .ptr = &swap_infos_arr, .len = swap_infos_arr.len };
+        x.dbe.swap.serialize(&msg, swap_infos, .{ .ext_opcode = dbe.opcode });
+        try common.send(sock, &msg);
     }
 }
 
 fn renderVideoDev(
     sock: os.socket_t,
     drawable_id: u32,
-    fg_gc_id: u32,
+    gc_id: u32,
     font_dims: FontDims,
     y_pos: i16,
     video_dev: VideoDev,
@@ -1133,7 +1232,7 @@ fn renderVideoDev(
     const path: []const u8 = if (video_dev.optional_device_path) |p| p else "<no-device-file>";
     switch (video_dev.cap) {
         .fail => |*cap| {
-            _ = try renderString(sock, drawable_id, fg_gc_id, 10, y_pos, "{}: {s} (failed to get cap with E{s})", .{
+            _ = try renderString(sock, drawable_id, gc_id, 10, y_pos, "{}: {s} (failed to get cap with E{s})", .{
                 video_dev.minor,
                 path,
                 @tagName(cap.errno),
@@ -1148,7 +1247,7 @@ fn renderVideoDev(
                 break :blk "";
             };
             var x_pos: i16 = 10;
-            const len = try renderString(sock, drawable_id, fg_gc_id, x_pos, y_pos, "{}: {s} \"{s}\" ({s}){s}", .{
+            const len = try renderString(sock, drawable_id, gc_id, x_pos, y_pos, "{}: {s} \"{s}\" ({s}){s}", .{
                 video_dev.minor,
                 path,
                 cap.card.sliceConst(),
@@ -1157,7 +1256,7 @@ fn renderVideoDev(
             });
             x_pos += @intCast(i16, len) * @intCast(i16, font_dims.width);
             for (cap.formats) |fmt| {
-                const fmt_len = try renderString(sock, drawable_id, fg_gc_id, x_pos, y_pos, " {s}", .{fmt.chars});
+                const fmt_len = try renderString(sock, drawable_id, gc_id, x_pos, y_pos, " {s}", .{fmt.chars});
                 x_pos += fmt_len * @as(i16, font_dims.width);
             }
         },
@@ -1167,7 +1266,7 @@ fn renderVideoDev(
 fn renderString(
     sock: os.socket_t,
     drawable_id: u32,
-    fg_gc_id: u32,
+    gc_id: u32,
     pos_x: i16,
     pos_y: i16,
     comptime fmt: []const u8,
@@ -1178,7 +1277,7 @@ fn renderString(
     const text_len = @intCast(u8, (std.fmt.bufPrint(text_buf, fmt, args) catch @panic("string too long")).len);
     x.image_text8.serializeNoTextCopy(&msg, text_len, .{
         .drawable_id = drawable_id,
-        .gc_id = fg_gc_id,
+        .gc_id = gc_id,
         .x = pos_x,
         .y = pos_y,
     });

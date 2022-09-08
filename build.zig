@@ -8,7 +8,7 @@ pub fn build(b: *std.build.Builder) void {
     const zigx_repo = GitRepoStep.create(b, .{
         .url = "https://github.com/marler8997/zigx",
         .branch = null,
-        .sha = "48aab73e7890a5f2393c843ead38ebe1ce50bd83",
+        .sha = "35affb906f29d19d8a29c680a46c26ef600fc665",
     });
 
     const exe = b.addExecutable("videoserver", "videoserver.zig");
