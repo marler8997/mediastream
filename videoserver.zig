@@ -82,7 +82,7 @@ pub fn main() !u8 {
                         std.log.info("keycode {} maps to {s}", .{keycode, @tagName(first_sym)});
                         try keycode_map.put(global.arena, keycode, key);
                     } else {
-                        std.log.info("keycode {} maps to non-interested sym {}", .{keycode, first_sym});
+                        //std.log.info("keycode {} maps to non-interested sym {}", .{keycode, first_sym});
                     }
                 }
 //                var j: usize = 0;
@@ -127,6 +127,7 @@ pub fn main() !u8 {
         const len = x.create_window.serialize(&msg_buf, .{
             .window_id = ids.window(),
             .parent_window_id = screen.root,
+            .depth = 0, // TODO: use this correctly?
             .x = 0,
             .y = 0,
             .width = window_width,
@@ -302,6 +303,22 @@ pub fn main() !u8 {
             },
         },
     };
+
+
+    const autostart_device: ?[]const u8 = null;
+    //const autostart_device: ?[]const u8 = "/dev/video0";
+    if (autostart_device) |d| {
+        for (state.main.show_devices.video_devs.items) |*dev| {
+            if (dev.optional_device_path) |p| {
+                if (std.mem.eql(u8, p, d)) {
+                    std.log.info("autostarting '{s}'...", .{d});
+                    try handleIntegerCommand(&state, dev.minor);
+                    try handlePCommand(&state);
+                    break;
+                }
+            }
+        }
+    }
 
     const max_request_len = @intCast(u18, conn.setup.fixed().max_request_len) * 4;
     std.log.info("maximum request length is {} bytes", .{max_request_len});
@@ -758,7 +775,7 @@ fn startPreview(video_dev: VideoDev) !Capture {
         .height = format.fmt.pix.height,
         .stride = format.fmt.pix.bytesperline,
         .format = cap_format,
-        .mmaps = [capture_buf_count][]u8 {
+        .mmaps = [capture_buf_count][]align(std.mem.page_size) u8 {
             ptr[0 .. buf.length],
         },
     };
