@@ -419,7 +419,7 @@ fn onVideo(capture: Capture, opt_frame_ref: *?CapturedRgbFrame) !enum { got_fram
             capture.stride,
             capture.width,
             capture.height),
-        .unknown =>
+        .unsupported =>
             // just copy it in there as is, we'll see "something"
             @memcpy(opt_frame_ref.*.?.mem.ptr, mem.ptr, std.math.min(mem.len, rgb_len)),
     }
@@ -529,6 +529,17 @@ fn onX11Read(
             .expose => |msg| {
                 std.log.info("expose: {}", .{msg});
                 try render(sock, max_request_len, ids, optional_dbe, font_dims, state);
+            },
+            .mapping_notify => |msg| switch (msg.request) {
+                .modifier => std.log.info("MappingNotify modifier, ignoring", .{}),
+                .pointer => std.log.info("MappingNotify pointer, ignoring", .{}),
+                .keyboard => {
+                    // updating the keyboard mapping would require some additional state, namely,
+                    // we would likely need/want to track sequence numbers of messages and
+                    // then track when we're expecting t GetKeyboardMapping reply
+                    std.log.info("MappingNotify keyboard, TODO: update keyboard mapping", .{});
+                },
+                else => std.log.warn("MappingNotify with unsupported request {}", .{msg.request}),
             },
             .unhandled => |msg| {
                 std.log.info("todo: server msg {}", .{msg});
@@ -662,7 +673,7 @@ fn startPreview(video_dev: VideoDev) !Capture {
 
         // TODO: show error to user
         std.log.info("format '{s}' is not supported yet", .{fourcc.chars});
-        break :blk .unknown;
+        break :blk .{ .unsupported = fourcc.* };
     };
 
     // call S_FMT so we *might* get ownership?
@@ -1017,9 +1028,21 @@ const FontDims = struct {
 };
 
 const capture_buf_count = 1;
-const CaptureFormat = enum {
-    yuyv,
-    unknown,
+const CaptureFormat = union(enum) {
+    yuyv: void,
+    unsupported: FourCC,
+    pub fn supported(self: CaptureFormat) bool {
+        return switch (self) {
+            .unsupported => false,
+            else => true,
+        };
+    }
+    pub fn str(self: *const CaptureFormat) []const u8 {
+        switch (self.*) {
+            .unsupported => return &self.unsupported.chars,
+            else => |f| return @tagName(f),
+        }
+    }
 };
 const Capture = struct {
     fd: os.fd_t,
@@ -1212,7 +1235,8 @@ fn render(
             },
             .device => |*dev| {
                 if (dev.capture) |*cap| {
-                    _ = try renderString(sock, drawable, ids.fg_gc(), 10, text_bottom_y - 4 * (font_dims.height + text_spacing_y), "video format: {s}", .{@tagName(cap.format)});
+                    const suffix: []const u8 = if (cap.format.supported()) "" else " (unsupported)";
+                    _ = try renderString(sock, drawable, ids.fg_gc(), 10, text_bottom_y - 4 * (font_dims.height + text_spacing_y), "video format: {s}{s}", .{cap.format.str(), suffix});
                 }
                 _ = try renderString(sock, drawable, ids.fg_gc(), 10, text_bottom_y - 3 * (font_dims.height + text_spacing_y), "p: show preview", .{});
                 _ = try renderString(sock, drawable, ids.fg_gc(), 10, text_bottom_y - 2 * (font_dims.height + text_spacing_y), "b: back to device list", .{});
