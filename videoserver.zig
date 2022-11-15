@@ -1134,7 +1134,6 @@ fn render(
         break :blk ids.window();
     };
 
-    _ = max_request_len;
 //    {
 //        const width = 256;
 //        const height = 256;
